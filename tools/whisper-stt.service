@@ -1,0 +1,26 @@
+[Unit]
+# Self-hosted whisper.cpp STT endpoint for the Pokédex Tab5.
+# Serves POST /inference (WAV in -> transcript out) on :8080.
+Description=Pokedex whisper.cpp speech-to-text server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Adjust User/paths to match the server. WHISPER_HOME is where you cloned
+# https://github.com/ggml-org/whisper.cpp and built whisper-server.
+User=whisper
+Environment=WHISPER_HOME=/opt/whisper.cpp
+ExecStart=/opt/whisper.cpp/build/bin/whisper-server \
+  -m /opt/whisper.cpp/models/ggml-base.en.bin \
+  -l en --host 0.0.0.0 --port 8080
+Restart=on-failure
+RestartSec=2
+# Hardening (relax if the model lives outside the home above).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/whisper.cpp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

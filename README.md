@@ -87,15 +87,56 @@ both the host preview and the Tab5 use the same contract: POST a WAV to
 `POKEDEX_STT_URL` (default `http://127.0.0.1:8080/inference`) so the service can
 move to a dedicated server later without code changes.
 
-Built at `~/whisper.cpp` with model `~/whisper.cpp/models/ggml-base.en.bin`.
-Start the server:
+The engine itself is **not** vendored here (it's a large external dependency).
+Set it up once — clone, build the server, and fetch the base.en model:
+
+```bash
+git clone https://github.com/ggml-org/whisper.cpp ~/whisper.cpp
+cd ~/whisper.cpp
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j --target whisper-server
+./models/download-ggml-model.sh base.en      # -> models/ggml-base.en.bin
+```
+
+Then start the server (leave it running while you use the device):
 
 ```bash
 ~/whisper.cpp/build/bin/whisper-server \
-  -m ~/whisper.cpp/models/ggml-base.en.bin --host 0.0.0.0 --port 8080
-# --host 0.0.0.0 so the Tab5 can reach it over the FritzBox LAN
+  -m ~/whisper.cpp/models/ggml-base.en.bin -l en --host 0.0.0.0 --port 8080
+# --host 0.0.0.0 so the Tab5 can reach it over the LAN
 # (use 127.0.0.1 for host-only testing)
 ```
+
+### Running it on a dedicated server (systemd)
+
+To move STT off this dev machine, build whisper.cpp on the server as above
+(clone to `/opt/whisper.cpp`, fetch `base.en`), then install the unit shipped at
+[`tools/whisper-stt.service`](tools/whisper-stt.service). Adjust its `User=` and
+the `/opt/whisper.cpp` paths to match the box, then:
+
+```bash
+# On the server (paths/user as in the unit file):
+sudo useradd --system --home /opt/whisper.cpp --shell /usr/sbin/nologin whisper
+sudo chown -R whisper: /opt/whisper.cpp
+sudo cp tools/whisper-stt.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now whisper-stt      # start now + on every boot
+
+systemctl status whisper-stt                 # check it's up
+journalctl -u whisper-stt -f                  # follow logs
+curl -F file=@recording.wav http://<server-ip>:8080/inference   # smoke test
+```
+
+Then re-point the two clients at the server's address (nothing else changes —
+the `/inference` contract is identical):
+
+- **Host tools:** `export POKEDEX_STT_URL="http://<server-ip>:8080/inference"`
+- **Tab5 firmware:** put `http://<server-ip>:8080/inference` in `stt-url.txt`
+  (git-ignored, project root). It's baked into `secrets.h` at CMake-configure
+  time — rebuild and flash the firmware to apply.
+
+Open port 8080 to the LAN only (e.g. `sudo ufw allow from 192.168.0.0/16 to any
+port 8080`); whisper-server has no auth, so don't expose it to the internet.
 
 Transcribe, or run the full chain from a recording:
 
