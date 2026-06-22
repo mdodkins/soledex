@@ -1,0 +1,27 @@
+# --- Secrets (NEVER commit) ---
+# Plain-text credential files at the repo root + the header generated from them.
+claude-api-key.txt
+wifi-passwords.txt
+stt-url.txt
+firmware/main/secrets.h
+
+# --- Build output ---
+# "build/" matches the host build dir AND firmware/build/ (any depth).
+build/
+# ESP-IDF components pulled from idf_component.yml (regenerated on configure).
+firmware/managed_components/
+# Generated from sdkconfig.defaults, which IS tracked.
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- Editor / OS junk ---
+*~
+*.un~
+.DS_Store
+
+# --- Claude Code (local machine state) ---
+.claude/settings.local.json

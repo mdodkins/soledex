@@ -1,0 +1,10 @@
+dependencies:
+  idf: ">=5.1"
+  # Full board support (power sequencing, display, mic, speaker, touch) for the
+  # M5Stack Tab5. Pulls in a compatible m5gfx.
+  m5stack/M5Unified: ">=0.2.4"
+  # WiFi on the ESP32-P4 is provided by the ESP32-C6 co-processor; esp_wifi_remote
+  # proxies the standard esp_wifi APIs to it, using esp_hosted (SDIO) as the
+  # transport to the C6 — the Tab5's C6 runs esp-hosted slave firmware.
+  espressif/esp_wifi_remote: ">=1.0.0"
+  espressif/esp_hosted: ">=2.0.0"
