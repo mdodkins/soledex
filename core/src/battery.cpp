@@ -13,4 +13,8 @@ Point batteryIconOrigin(int dispW) {
   return Point{dispW - kBatteryMargin - kBatteryIconSize.width, kBatteryMargin};
 }
 
+bool batteryCharging(int currentMa) {
+  return currentMa > kChargeCurrentThresholdMa;
+}
+
 }  // namespace pokedex

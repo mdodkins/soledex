@@ -448,8 +448,12 @@ std::string runKeyboardScreen() {
 void drawBattery() {
   constexpr int kBars = 4;
   const int level = M5.Power.getBatteryLevel();
-  const bool charging =
-      M5.Power.isCharging() == m5::Power_Class::is_charging_t::is_charging;
+  // Judge charging from current direction (into battery = +), not the CHG_STAT
+  // pin, which can stay asserted after the cable is pulled.
+  const int current_ma = M5.Power.getBatteryCurrent();
+  const bool charging = pokedex::batteryCharging(current_ma);
+  ESP_LOGI(TAG, "battery %d%% cur=%dmA charging=%d", level, current_ma,
+           (int)charging);
   const auto o = pokedex::batteryIconOrigin(M5.Display.width());
   const auto s = pokedex::kBatteryIconSize;
   const int filled = pokedex::batteryBars(level, kBars);
@@ -470,10 +474,10 @@ void drawBattery() {
   M5.Display.drawRoundRect(o.x, o.y, s.width, s.height, 4, 0xFFFFFFu);
   M5.Display.fillRect(o.x + s.width, o.y + s.height / 2 - 6, 6, 12, 0xFFFFFFu);
 
-  // Filled bars.
+  // Filled bars. Yellow is reserved for the charging bolt, so a discharging
+  // battery is never yellow: green while charging, red when low, else white.
   const uint32_t fill = charging      ? 0x30FF30u
                         : level <= 20 ? 0xFF3030u
-                        : level <= 50 ? 0xFFD000u
                                       : 0xFFFFFFu;
   const int pad = 4;
   const int bar_w = (s.width - pad * (kBars + 1)) / kBars;
@@ -514,8 +518,9 @@ extern "C" void app_main(void) {
   // up with the screen + WiFi + audio load.
   M5.Power.setBatteryCharge(true);
   M5.Power.setChargeCurrent(1000);
-  ESP_LOGI(TAG, "battery %d%%, charging=%d", (int)M5.Power.getBatteryLevel(),
-           (int)(M5.Power.isCharging() == m5::Power_Class::is_charging_t::is_charging));
+  ESP_LOGI(TAG, "battery %d%%, cur=%dmA, charging=%d",
+           (int)M5.Power.getBatteryLevel(), (int)M5.Power.getBatteryCurrent(),
+           (int)pokedex::batteryCharging(M5.Power.getBatteryCurrent()));
 
   pokedex::M5GfxDisplay display;
   if (!display.begin()) {
