@@ -218,17 +218,35 @@ void evictOutsideCache(const std::vector<std::string>& urls, int index) {
 
 // Download the single highest-priority not-yet-cached card in the window around
 // `index`. Returns true if it fetched one (i.e. there is more buffering to do).
-// Called when idle so the next swipe lands on an already-resident card.
+// Called when idle so the next swipe lands on an already-resident card. The
+// download is narrated on the bottom strip with the animated "Loading next
+// card..." dots (same busy animator as the search flow).
 bool prefetchOne(const std::vector<std::string>& urls, int index) {
   for (int j : pokedex::prefetchWindow(index, static_cast<int>(urls.size()),
                                        pokedex::kPrefetchBack,
                                        pokedex::kPrefetchAhead)) {
     if (s_card_cache.find(urls[j]) == s_card_cache.end()) {
+      startBusy("Loading next card", 0xFFD000u);
       loadCard(urls[j]);
+      stopBusy();
       return true;
     }
   }
   return false;
+}
+
+// One idle buffering step, narrated on the bottom status strip: animate
+// "Loading next card..." while a card downloads, then show "Next card loaded!"
+// once the whole window around `index` is resident. `buffering` tracks whether a
+// download happened so the "loaded" message shows exactly once per fill.
+void prefetchTick(const std::vector<std::string>& urls, int index,
+                  bool& buffering) {
+  if (prefetchOne(urls, index)) {
+    buffering = true;
+  } else if (buffering) {
+    showStatus("Next card loaded!", 0x30FF30u);
+    buffering = false;
+  }
 }
 
 // Draw a card PNG scaled-to-fit, centred, loading it from cache (or the network
@@ -311,6 +329,7 @@ void runResultsBrowser(const std::vector<std::string>& urls) {
   evictOutsideCache(urls, 0);
 
   bool prev_down = false;
+  bool buffering = false;
   pokedex::Point start{0, 0}, last{0, 0};
   while (true) {
     M5.update();
@@ -333,11 +352,12 @@ void runResultsBrowser(const std::vector<std::string>& urls) {
           showCardImage(urls[browser.index()], browser.index(), total);
           drawAddButton(urls[browser.index()]);
           evictOutsideCache(urls, browser.index());
+          buffering = false;  // narrate buffering afresh for this card
         }
       }
     } else {
       // Idle (finger up): buffer the next card so the coming swipe is instant.
-      prefetchOne(urls, browser.index());
+      prefetchTick(urls, browser.index(), buffering);
     }
     prev_down = down;
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -363,6 +383,7 @@ void runDeckBrowser() {
   evictOutsideCache(urls, index);
 
   bool prev_down = false;
+  bool buffering = false;
   pokedex::Point start{0, 0}, last{0, 0};
   while (true) {
     M5.update();
@@ -385,6 +406,7 @@ void runDeckBrowser() {
         showCardImage(urls[index], index, static_cast<int>(urls.size()));
         drawRemoveButton();
         evictOutsideCache(urls, index);
+        buffering = false;
       } else {
         pokedex::BrowseAction act = browser.apply(swipe);
         if (act == pokedex::BrowseAction::GoHome) return;
@@ -394,10 +416,11 @@ void runDeckBrowser() {
           showCardImage(urls[index], index, static_cast<int>(urls.size()));
           drawRemoveButton();
           evictOutsideCache(urls, index);
+          buffering = false;
         }
       }
     } else {
-      prefetchOne(urls, index);  // buffer ahead while idle
+      prefetchTick(urls, index, buffering);  // buffer ahead while idle
     }
     prev_down = down;
     vTaskDelay(pdMS_TO_TICKS(20));
