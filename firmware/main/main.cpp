@@ -11,8 +11,11 @@
 #include "freertos/task.h"
 #include "m5gfx_display.h"
 #include "net.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "pokedex/card_browser.h"
+#include "pokedex/deck.h"
+#include "pokedex/deck_screen.h"
 #include "pokedex/gesture.h"
 #include "pokedex/hit_test.h"
 #include "pokedex/home_screen.h"
@@ -44,6 +47,58 @@ constexpr int kMaxCards = 60;  // pokemontcg.io page size (cards per search)
 
 std::size_t len(const uint8_t* start, const uint8_t* end) {
   return static_cast<std::size_t>(end - start);
+}
+
+// ---- Deck (persisted in NVS) ------------------------------------------------
+// The single deck the user builds. Cards are their image URLs; the model and
+// its serialization are the host-tested pokedex::Deck. We persist the flat blob
+// under one NVS key so the deck survives reboots.
+pokedex::Deck s_deck;
+// The deck lives in its own NVS partition (see partitions.csv) so it is never
+// collateral when the shared system `nvs` (WiFi) is wiped on NO_FREE_PAGES or an
+// NVS-format upgrade. initDeckStorage() must run once before load/save.
+constexpr char kDeckNvsPartition[] = "deck_nvs";
+constexpr char kDeckNvsNamespace[] = "pokedex";
+constexpr char kDeckNvsKey[] = "deck";
+
+// Bring up the dedicated deck partition. If it is brand new (first flash) or its
+// pages are exhausted, format just THIS partition — never the system nvs.
+void initDeckStorage() {
+  esp_err_t err = nvs_flash_init_partition(kDeckNvsPartition);
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    ESP_ERROR_CHECK(nvs_flash_erase_partition(kDeckNvsPartition));
+    err = nvs_flash_init_partition(kDeckNvsPartition);
+  }
+  if (err != ESP_OK) ESP_LOGE(TAG, "deck NVS init failed: %s", esp_err_to_name(err));
+}
+
+void loadDeck() {
+  nvs_handle_t h;
+  if (nvs_open_from_partition(kDeckNvsPartition, kDeckNvsNamespace,
+                              NVS_READONLY, &h) != ESP_OK) {
+    return;
+  }
+  std::size_t need = 0;
+  if (nvs_get_str(h, kDeckNvsKey, nullptr, &need) == ESP_OK && need > 0) {
+    std::vector<char> buf(need);
+    if (nvs_get_str(h, kDeckNvsKey, buf.data(), &need) == ESP_OK) {
+      s_deck = pokedex::Deck::deserialize(std::string(buf.data()));
+    }
+  }
+  nvs_close(h);
+  ESP_LOGI(TAG, "loaded deck: %d card(s)", s_deck.size());
+}
+
+void saveDeck() {
+  nvs_handle_t h;
+  if (nvs_open_from_partition(kDeckNvsPartition, kDeckNvsNamespace,
+                              NVS_READWRITE, &h) != ESP_OK) {
+    return;
+  }
+  std::string blob = s_deck.serialize();
+  nvs_set_str(h, kDeckNvsKey, blob.c_str());
+  nvs_commit(h);
+  nvs_close(h);
 }
 
 // ---- Status line + animated "busy" indicator -------------------------------
@@ -153,12 +208,50 @@ bool showCardImage(const std::string& url, int index, int total) {
   return true;
 }
 
-// Show the result cards and let the user swipe: left/right between cards,
-// up to return to the home screen.
+// Draw one of the rounded-rect deck buttons that overlay a card image, centring
+// `label` in it. Matches the keyboard keys' look.
+void drawDeckButton(pokedex::Point origin, const char* label, uint32_t fill,
+                    int text_size) {
+  const auto s = pokedex::kDeckButtonSize;
+  M5.Display.fillRoundRect(origin.x, origin.y, s.width, s.height, 14, fill);
+  M5.Display.setTextColor(0xFFFFFFu);
+  M5.Display.setTextSize(text_size);
+  M5.Display.setTextDatum(textdatum_t::middle_center);
+  M5.Display.drawString(label, origin.x + s.width / 2, origin.y + s.height / 2);
+}
+
+// The "+ / Added" button, top-right: green "+" while the card can still be
+// added, muted grey "Added" once it is in the deck.
+void drawAddButton(const std::string& url) {
+  bool added = s_deck.contains(url);
+  drawDeckButton(pokedex::addButtonOrigin(M5.Display.width()),
+                 pokedex::addButtonLabel(s_deck, url),
+                 added ? 0x404040u : 0x107C10u, added ? 4 : 7);
+}
+
+// The "-" remove button, top-left, shown only while viewing the deck.
+void drawRemoveButton() {
+  drawDeckButton(pokedex::removeButtonOrigin(), "-", 0xA01010u, 7);
+}
+
+// True if a release at `last` (with no swipe) was a tap inside `origin`'s
+// deck-button rectangle.
+bool tappedButton(pokedex::Point origin, pokedex::Swipe swipe,
+                  pokedex::Point last) {
+  return swipe == pokedex::Swipe::None &&
+         pokedex::contains(origin, pokedex::kDeckButtonSize, last);
+}
+
+// Show the result cards and let the user swipe: left/right between cards, up to
+// return to the home screen. Tapping the top-right "+" adds the current card to
+// the deck (button then reads "Added").
 void runResultsBrowser(const std::vector<std::string>& urls) {
   const int total = static_cast<int>(urls.size());
+  const pokedex::Point add_origin =
+      pokedex::addButtonOrigin(M5.Display.width());
   pokedex::CardBrowser browser(total);
   showCardImage(urls[0], 0, total);
+  drawAddButton(urls[0]);
 
   bool prev_down = false;
   pokedex::Point start{0, 0}, last{0, 0};
@@ -170,12 +263,74 @@ void runResultsBrowser(const std::vector<std::string>& urls) {
       last = {t.x, t.y};
       if (!prev_down) start = last;
     } else if (prev_down) {
-      pokedex::BrowseAction act =
-          browser.apply(pokedex::detectSwipe(start, last, 60));
-      if (act == pokedex::BrowseAction::GoHome) return;
-      if (act == pokedex::BrowseAction::NextCard ||
-          act == pokedex::BrowseAction::PrevCard) {
-        showCardImage(urls[browser.index()], browser.index(), total);
+      pokedex::Swipe swipe = pokedex::detectSwipe(start, last, 60);
+      if (tappedButton(add_origin, swipe, last)) {
+        s_deck.add(urls[browser.index()]);
+        saveDeck();
+        drawAddButton(urls[browser.index()]);  // now "Added"
+      } else {
+        pokedex::BrowseAction act = browser.apply(swipe);
+        if (act == pokedex::BrowseAction::GoHome) return;
+        if (act == pokedex::BrowseAction::NextCard ||
+            act == pokedex::BrowseAction::PrevCard) {
+          showCardImage(urls[browser.index()], browser.index(), total);
+          drawAddButton(urls[browser.index()]);
+        }
+      }
+    }
+    prev_down = down;
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
+// Browse the deck the same way (swipe left/right, up to go home). Tapping the
+// top-left "-" removes the current card; the deck shrinks live and we drop back
+// home once it is empty.
+void runDeckBrowser() {
+  std::vector<std::string> urls = s_deck.cards();  // snapshot
+  if (urls.empty()) {
+    M5.Display.fillScreen(0x000000u);
+    showStatus("Deck is empty", 0xFFD000u);
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    return;
+  }
+  const pokedex::Point remove_origin = pokedex::removeButtonOrigin();
+  int index = 0;
+  pokedex::CardBrowser browser(static_cast<int>(urls.size()));
+  showCardImage(urls[index], index, static_cast<int>(urls.size()));
+  drawRemoveButton();
+
+  bool prev_down = false;
+  pokedex::Point start{0, 0}, last{0, 0};
+  while (true) {
+    M5.update();
+    bool down = M5.Touch.getCount() > 0;
+    auto t = M5.Touch.getDetail();
+    if (down) {
+      last = {t.x, t.y};
+      if (!prev_down) start = last;
+    } else if (prev_down) {
+      pokedex::Swipe swipe = pokedex::detectSwipe(start, last, 60);
+      if (tappedButton(remove_origin, swipe, last)) {
+        s_deck.remove(urls[index]);
+        saveDeck();
+        urls.erase(urls.begin() + index);
+        if (urls.empty()) return;  // deck emptied -> back home
+        if (index >= static_cast<int>(urls.size())) index = urls.size() - 1;
+        // Rebuild the browser for the new count, re-advanced to `index`.
+        browser = pokedex::CardBrowser(static_cast<int>(urls.size()));
+        for (int i = 0; i < index; ++i) browser.apply(pokedex::Swipe::Left);
+        showCardImage(urls[index], index, static_cast<int>(urls.size()));
+        drawRemoveButton();
+      } else {
+        pokedex::BrowseAction act = browser.apply(swipe);
+        if (act == pokedex::BrowseAction::GoHome) return;
+        if (act == pokedex::BrowseAction::NextCard ||
+            act == pokedex::BrowseAction::PrevCard) {
+          index = browser.index();
+          showCardImage(urls[index], index, static_cast<int>(urls.size()));
+          drawRemoveButton();
+        }
       }
     }
     prev_down = down;
@@ -285,6 +440,18 @@ std::string runKeyboardScreen() {
     vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
+
+// The blue "View deck" button on the home screen, above Jolteon. renderHome
+// leaves the gap for it; we draw the text button there ourselves.
+void drawViewDeckButton(const pokedex::HomeLayout& layout) {
+  const auto o = layout.deck;
+  const auto s = pokedex::kViewDeckButtonSize;
+  M5.Display.fillRoundRect(o.x, o.y, s.width, s.height, 14, 0x1060C0u);
+  M5.Display.setTextColor(0xFFFFFFu);
+  M5.Display.setTextSize(4);
+  M5.Display.setTextDatum(textdatum_t::middle_center);
+  M5.Display.drawString("View deck", o.x + s.width / 2, o.y + s.height / 2);
+}
 }  // namespace
 
 extern "C" void app_main(void) {
@@ -310,11 +477,24 @@ extern "C" void app_main(void) {
   s_disp_mtx = xSemaphoreCreateMutex();
   xTaskCreate(busyTask, "busy", 4096, nullptr, 4, nullptr);
 
+  // Mic + keyboard button hit rectangles + the deck button position (same
+  // layout maths the renderer used).
+  auto mic_size = pokedex::pngSize(mic_start, len(mic_start, mic_end));
+  auto kbd_size = pokedex::pngSize(kbd_start, len(kbd_start, kbd_end));
+  pokedex::HomeLayout layout = pokedex::homeLayout(
+      display.width(), display.height(),
+      *pokedex::pngSize(title_start, len(title_start, title_end)),
+      *pokedex::pngSize(hero_start, len(hero_start, hero_end)), *mic_size,
+      *kbd_size);
+
   auto render = [&] {
-    return pokedex::renderHome(display, title_start, len(title_start, title_end),
-                               hero_start, len(hero_start, hero_end), mic_start,
-                               len(mic_start, mic_end), kbd_start,
-                               len(kbd_start, kbd_end));
+    bool ok =
+        pokedex::renderHome(display, title_start, len(title_start, title_end),
+                            hero_start, len(hero_start, hero_end), mic_start,
+                            len(mic_start, mic_end), kbd_start,
+                            len(kbd_start, kbd_end));
+    drawViewDeckButton(layout);  // overlay the text button renderHome left room for
+    return ok;
   };
   render();
 
@@ -324,6 +504,8 @@ extern "C" void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_erase());
     ESP_ERROR_CHECK(nvs_flash_init());
   }
+  initDeckStorage();  // bring up the dedicated deck partition
+  loadDeck();          // restore the saved deck
   showStatus("WiFi: connecting...", 0xFFD000u);
   std::string ip;
   if (pokedex::wifiConnect(WIFI_SSID, WIFI_PASSWORD, ip)) {
@@ -334,15 +516,6 @@ extern "C" void app_main(void) {
   } else {
     showStatus("WiFi failed", 0xFF3030u);
   }
-
-  // Mic + keyboard button hit rectangles (same layout maths the renderer used).
-  auto mic_size = pokedex::pngSize(mic_start, len(mic_start, mic_end));
-  auto kbd_size = pokedex::pngSize(kbd_start, len(kbd_start, kbd_end));
-  pokedex::HomeLayout layout = pokedex::homeLayout(
-      display.width(), display.height(),
-      *pokedex::pngSize(title_start, len(title_start, title_end)),
-      *pokedex::pngSize(hero_start, len(hero_start, hero_end)), *mic_size,
-      *kbd_size);
 
   // Recording buffer in PSRAM.
   auto* buf = static_cast<int16_t*>(
@@ -355,6 +528,7 @@ extern "C" void app_main(void) {
   bool recording = false;
   bool last_down = false;
   bool press_on_kbd = false;                  // press began on the keyboard icon
+  bool press_on_deck = false;                 // press began on the View deck button
   size_t rec_index = 0;                       // samples captured so far
   const size_t kChunk = kSampleRate / 10;     // 100ms per record() call
 
@@ -369,6 +543,8 @@ extern "C" void app_main(void) {
     bool release_edge = !finger_down && last_down;
     if (press_edge) {
       press_on_kbd = pokedex::contains(layout.kbd, *kbd_size, tp);
+      press_on_deck =
+          pokedex::contains(layout.deck, pokedex::kViewDeckButtonSize, tp);
     }
 
     if (finger_down != last_down) {
@@ -376,6 +552,14 @@ extern "C" void app_main(void) {
                finger_down ? "DOWN" : "UP", M5.Touch.getCount(), t.x, t.y,
                on_mic);
       last_down = finger_down;
+    }
+
+    // Tap on the "View deck" button -> browse the saved deck (minus to remove).
+    if (release_edge && press_on_deck && !recording) {
+      press_on_deck = false;
+      runDeckBrowser();  // returns on swipe-up or when the deck empties
+      render();          // back to the home screen
+      continue;
     }
 
     // Tap on the keyboard icon -> open the on-screen keyboard. On GO, plumb the

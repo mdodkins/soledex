@@ -9,14 +9,20 @@ HomeLayout homeLayout(int dispW, int dispH, ImageSize title, ImageSize hero,
   HomeLayout layout;
   layout.title = Point{(dispW - title.width) / 2, kHomeTopMargin};
 
-  // Hero and mic form a vertical stack centred in the space below the title.
+  // The "View deck" button, hero and mic form a vertical stack (deck above
+  // hero above mic, each separated by kHomeGap) centred in the space below the
+  // title.
+  const ImageSize deck = kViewDeckButtonSize;
   int below = kHomeTopMargin + title.height;
-  int group_height = hero.height + kHomeGap + mic.height;
+  int group_height =
+      deck.height + kHomeGap + hero.height + kHomeGap + mic.height;
   int group_top = below + (dispH - below - group_height) / 2;
 
-  layout.hero = Point{(dispW - hero.width) / 2, group_top};
+  layout.deck = Point{(dispW - deck.width) / 2, group_top};
+  layout.hero = Point{(dispW - hero.width) / 2,
+                      group_top + deck.height + kHomeGap};
   layout.mic = Point{(dispW - mic.width) / 2,
-                     group_top + hero.height + kHomeGap};
+                     layout.hero.y + hero.height + kHomeGap};
   layout.kbd = Point{(dispW - kbd.width) / 2,
                      layout.mic.y + mic.height + kHomeGap};
   return layout;

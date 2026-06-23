@@ -12,9 +12,13 @@ namespace pokedex {
 inline constexpr int kHomeTopMargin = 60;
 // Vertical gap (px) between the centre image and the mic button below it.
 inline constexpr int kHomeGap = 20;
+// The "View deck" button is a text button (no PNG), so its size is fixed here
+// rather than read from an image.
+inline constexpr ImageSize kViewDeckButtonSize{280, 90};
 
 struct HomeLayout {
   Point title;
+  Point deck;  // the "View deck" button, above the hero
   Point hero;  // the centre image (e.g. Jolteon)
   Point mic;
   Point kbd;   // the keyboard button, below the mic

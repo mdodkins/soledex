@@ -2,3 +2,8 @@
 nvs,      data, nvs,     0x9000,   0x6000
 phy_init, data, phy,     0xf000,   0x1000
 factory,  app,  factory, 0x10000,  0x400000
+# Dedicated NVS for the user's deck, isolated from the system `nvs` partition
+# that WiFi shares. Keeping it separate means a full WiFi-NVS wipe (NO_FREE_PAGES
+# / new NVS format on an IDF upgrade) can never take the deck down with it.
+# Auto-placed right after the app; do NOT move it once decks exist on a board.
+deck_nvs, data, nvs,     ,         0x4000

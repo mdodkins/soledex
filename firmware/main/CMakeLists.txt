@@ -17,6 +17,8 @@ idf_component_register(
     "${CORE_DIR}/src/hit_test.cpp"
     "${CORE_DIR}/src/gesture.cpp"
     "${CORE_DIR}/src/card_browser.cpp"
+    "${CORE_DIR}/src/deck.cpp"
+    "${CORE_DIR}/src/deck_screen.cpp"
     "${CORE_DIR}/src/tcg.cpp"
     "${CORE_DIR}/src/wav.cpp"
     "${CORE_DIR}/src/keyboard.cpp"

@@ -13,6 +13,8 @@ add_library(pokedex_core
   core/src/hit_test.cpp
   core/src/gesture.cpp
   core/src/card_browser.cpp
+  core/src/deck.cpp
+  core/src/deck_screen.cpp
   core/src/tcg.cpp
   core/src/wav.cpp
   core/src/keyboard.cpp
@@ -32,6 +34,8 @@ add_executable(pokedex_tests
   test/hit_test_test.cpp
   test/gesture_test.cpp
   test/card_browser_test.cpp
+  test/deck_test.cpp
+  test/deck_screen_test.cpp
   test/tcg_test.cpp
   test/wav_test.cpp
   test/keyboard_test.cpp
