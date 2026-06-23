@@ -18,14 +18,15 @@ inline constexpr ImageSize kBatteryIconSize{72, 32};
 // Top-left origin of the battery icon, tucked into the top-right corner.
 Point batteryIconOrigin(int dispW);
 
-// Charge current (mA) above which we call the battery "charging". A small
-// positive threshold ignores measurement noise and trickle near full, and rules
-// out the discharge case (current flows OUT — negative — whenever unplugged).
+// Charge current magnitude (mA) above which we call the battery "charging". The
+// threshold ignores measurement noise and trickle near full, and rules out the
+// discharge case (current flows the other way whenever unplugged).
 inline constexpr int kChargeCurrentThresholdMa = 40;
 
-// Whether the battery is charging, judged from its current (positive = flowing
-// into the battery). This is more reliable than a CHG_STAT pin, which can stay
-// asserted after the cable is unplugged.
+// Whether the battery is charging, judged from its current. On the Tab5 the
+// INA226 shunt reads NEGATIVE when current flows into the battery, so charging
+// is a sufficiently negative current. This is more reliable than a CHG_STAT
+// pin, which can stay asserted after the cable is unplugged.
 bool batteryCharging(int currentMa);
 
 }  // namespace pokedex
