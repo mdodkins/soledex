@@ -16,6 +16,7 @@ idf_component_register(
     "${CORE_DIR}/src/home_screen.cpp"
     "${CORE_DIR}/src/hit_test.cpp"
     "${CORE_DIR}/src/gesture.cpp"
+    "${CORE_DIR}/src/battery.cpp"
     "${CORE_DIR}/src/card_browser.cpp"
     "${CORE_DIR}/src/deck.cpp"
     "${CORE_DIR}/src/deck_screen.cpp"

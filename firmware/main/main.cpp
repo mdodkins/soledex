@@ -13,6 +13,7 @@
 #include "net.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "pokedex/battery.h"
 #include "pokedex/card_browser.h"
 #include "pokedex/deck.h"
 #include "pokedex/deck_screen.h"
@@ -441,6 +442,48 @@ std::string runKeyboardScreen() {
   }
 }
 
+// The battery indicator in the top-right of the home screen: a 4-bar icon whose
+// fill reflects charge level, plus a yellow bolt to its left while charging.
+// Bars are green when charging, red when low, amber mid, white when healthy.
+void drawBattery() {
+  constexpr int kBars = 4;
+  const int level = M5.Power.getBatteryLevel();
+  const bool charging =
+      M5.Power.isCharging() == m5::Power_Class::is_charging_t::is_charging;
+  const auto o = pokedex::batteryIconOrigin(M5.Display.width());
+  const auto s = pokedex::kBatteryIconSize;
+  const int filled = pokedex::batteryBars(level, kBars);
+
+  // Clear the whole indicator region (bolt area on the left + body + nub).
+  M5.Display.fillRect(o.x - 28, o.y - 2, s.width + 28 + 12, s.height + 4,
+                      0x000000u);
+
+  if (charging) {  // a simple lightning bolt from two triangles
+    const int bx = o.x - 24, by = o.y;
+    M5.Display.fillTriangle(bx + 11, by, bx, by + 18, bx + 10, by + 18,
+                            0xFFD000u);
+    M5.Display.fillTriangle(bx + 10, by + 14, bx + 20, by + 14, bx + 9,
+                            by + s.height, 0xFFD000u);
+  }
+
+  // Body outline + the little terminal nub on the right.
+  M5.Display.drawRoundRect(o.x, o.y, s.width, s.height, 4, 0xFFFFFFu);
+  M5.Display.fillRect(o.x + s.width, o.y + s.height / 2 - 6, 6, 12, 0xFFFFFFu);
+
+  // Filled bars.
+  const uint32_t fill = charging      ? 0x30FF30u
+                        : level <= 20 ? 0xFF3030u
+                        : level <= 50 ? 0xFFD000u
+                                      : 0xFFFFFFu;
+  const int pad = 4;
+  const int bar_w = (s.width - pad * (kBars + 1)) / kBars;
+  const int bar_h = s.height - pad * 2;
+  for (int i = 0; i < filled; ++i) {
+    M5.Display.fillRect(o.x + pad + i * (bar_w + pad), o.y + pad, bar_w, bar_h,
+                        fill);
+  }
+}
+
 // The blue "View deck" button on the home screen, above Jolteon. renderHome
 // leaves the gap for it; we draw the text button there ourselves.
 void drawViewDeckButton(const pokedex::HomeLayout& layout) {
@@ -464,6 +507,15 @@ extern "C" void app_main(void) {
     mic_cfg.magnification = 8;  // modest gain; speaker volume gives loudness
     M5.Mic.config(mic_cfg);
   }
+
+  // Make sure the battery actually charges while plugged in: enable charging and
+  // request the Tab5's max rate (1000mA, QuickCharge on). M5.begin() enables
+  // charging by default, but this is cheap insurance and helps the charge keep
+  // up with the screen + WiFi + audio load.
+  M5.Power.setBatteryCharge(true);
+  M5.Power.setChargeCurrent(1000);
+  ESP_LOGI(TAG, "battery %d%%, charging=%d", (int)M5.Power.getBatteryLevel(),
+           (int)(M5.Power.isCharging() == m5::Power_Class::is_charging_t::is_charging));
 
   pokedex::M5GfxDisplay display;
   if (!display.begin()) {
@@ -494,6 +546,7 @@ extern "C" void app_main(void) {
                             len(mic_start, mic_end), kbd_start,
                             len(kbd_start, kbd_end));
     drawViewDeckButton(layout);  // overlay the text button renderHome left room for
+    drawBattery();               // top-right charge indicator
     return ok;
   };
   render();
@@ -531,8 +584,16 @@ extern "C" void app_main(void) {
   bool press_on_deck = false;                 // press began on the View deck button
   size_t rec_index = 0;                       // samples captured so far
   const size_t kChunk = kSampleRate / 10;     // 100ms per record() call
+  int battery_ticks = 0;  // refresh the indicator every ~2s (100 * 20ms)
 
   while (true) {
+    // Periodically refresh the battery indicator so plugging/unplugging and
+    // level changes show up without leaving the home screen. Skip while
+    // recording so it can't fight the recording UI for the display.
+    if (!recording && ++battery_ticks >= 100) {
+      battery_ticks = 0;
+      drawBattery();
+    }
     M5.update();
     // Current finger count gives true press-and-hold semantics.
     bool finger_down = M5.Touch.getCount() > 0;
