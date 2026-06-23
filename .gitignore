@@ -3,6 +3,7 @@
 claude-api-key.txt
 wifi-passwords.txt
 stt-url.txt
+stt-auth.txt
 firmware/main/secrets.h
 
 # --- Build output ---

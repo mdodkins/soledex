@@ -16,6 +16,7 @@ add_library(pokedex_core
   core/src/tcg.cpp
   core/src/wav.cpp
   core/src/keyboard.cpp
+  core/src/base64.cpp
 )
 target_include_directories(pokedex_core PUBLIC core/include)
 
@@ -34,6 +35,7 @@ add_executable(pokedex_tests
   test/tcg_test.cpp
   test/wav_test.cpp
   test/keyboard_test.cpp
+  test/base64_test.cpp
 )
 target_include_directories(pokedex_tests PRIVATE test)
 target_link_libraries(pokedex_tests PRIVATE pokedex_core GTest::gtest GTest::gtest_main)

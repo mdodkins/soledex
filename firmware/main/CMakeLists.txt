@@ -20,6 +20,7 @@ idf_component_register(
     "${CORE_DIR}/src/tcg.cpp"
     "${CORE_DIR}/src/wav.cpp"
     "${CORE_DIR}/src/keyboard.cpp"
+    "${CORE_DIR}/src/base64.cpp"
   INCLUDE_DIRS
     "."
     "${CORE_DIR}/include"
