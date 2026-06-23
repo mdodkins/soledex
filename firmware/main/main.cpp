@@ -1,7 +1,11 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <map>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "esp_heap_caps.h"
@@ -15,6 +19,7 @@
 #include "nvs_flash.h"
 #include "pokedex/battery.h"
 #include "pokedex/card_browser.h"
+#include "pokedex/card_prefetch.h"
 #include "pokedex/deck.h"
 #include "pokedex/deck_screen.h"
 #include "pokedex/gesture.h"
@@ -172,19 +177,69 @@ void drawCounter(int index, int total) {
   M5.Display.drawString(counter.c_str(), M5.Display.width() / 2, 16);
 }
 
-// Download a card PNG and draw it scaled-to-fit, centred. Returns false on a
-// download/decode failure. The "i / N" counter is shown immediately (before the
-// download) so the user sees which card is loading.
-bool showCardImage(const std::string& url, int index, int total) {
-  M5.Display.fillScreen(0x000000u);
-  drawCounter(index, total);
+// Downloaded card PNGs, keyed by image URL, kept in PSRAM (large allocations
+// spill there automatically). std::map keeps references/pointers stable as
+// other entries are inserted or evicted, so a pointer into the cache stays valid
+// while we draw from it. Bounded to a small window around the current card by
+// evictOutsideCache().
+std::map<std::string, std::string> s_card_cache;
+
+// Return the PNG bytes for `url`, downloading and caching them on a miss. A
+// failed download is not cached (so it retries) and returns an empty string.
+const std::string& loadCard(const std::string& url) {
+  auto it = s_card_cache.find(url);
+  if (it != s_card_cache.end()) return it->second;  // hit: no network
 
   std::string png;
   int status = pokedex::httpGet(url, png);
   if (status != 200 || png.empty()) {
     ESP_LOGE(TAG, "card GET %d (%u bytes)", status, (unsigned)png.size());
-    return false;
+    static const std::string kEmpty;
+    return kEmpty;
   }
+  ESP_LOGI(TAG, "cached card %u bytes (%u resident, free_heap=%u)",
+           (unsigned)png.size(), (unsigned)s_card_cache.size() + 1,
+           (unsigned)esp_get_free_heap_size());
+  return s_card_cache.emplace(url, std::move(png)).first->second;
+}
+
+// Drop cached cards outside the prefetch window around `index`, bounding memory.
+void evictOutsideCache(const std::vector<std::string>& urls, int index) {
+  std::set<std::string> keep;
+  for (int j : pokedex::prefetchWindow(index, static_cast<int>(urls.size()),
+                                       pokedex::kPrefetchBack,
+                                       pokedex::kPrefetchAhead)) {
+    keep.insert(urls[j]);
+  }
+  for (auto it = s_card_cache.begin(); it != s_card_cache.end();) {
+    it = keep.count(it->first) ? std::next(it) : s_card_cache.erase(it);
+  }
+}
+
+// Download the single highest-priority not-yet-cached card in the window around
+// `index`. Returns true if it fetched one (i.e. there is more buffering to do).
+// Called when idle so the next swipe lands on an already-resident card.
+bool prefetchOne(const std::vector<std::string>& urls, int index) {
+  for (int j : pokedex::prefetchWindow(index, static_cast<int>(urls.size()),
+                                       pokedex::kPrefetchBack,
+                                       pokedex::kPrefetchAhead)) {
+    if (s_card_cache.find(urls[j]) == s_card_cache.end()) {
+      loadCard(urls[j]);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Draw a card PNG scaled-to-fit, centred, loading it from cache (or the network
+// on a miss). Returns false on a download/decode failure. The "i / N" counter is
+// shown first so the user sees which card is loading on a cache miss.
+bool showCardImage(const std::string& url, int index, int total) {
+  M5.Display.fillScreen(0x000000u);
+  drawCounter(index, total);
+
+  const std::string& png = loadCard(url);
+  if (png.empty()) return false;
   const auto* bytes = reinterpret_cast<const uint8_t*>(png.data());
   const int disp_w = M5.Display.width();
   const int disp_h = M5.Display.height();
@@ -253,6 +308,7 @@ void runResultsBrowser(const std::vector<std::string>& urls) {
   pokedex::CardBrowser browser(total);
   showCardImage(urls[0], 0, total);
   drawAddButton(urls[0]);
+  evictOutsideCache(urls, 0);
 
   bool prev_down = false;
   pokedex::Point start{0, 0}, last{0, 0};
@@ -276,8 +332,12 @@ void runResultsBrowser(const std::vector<std::string>& urls) {
             act == pokedex::BrowseAction::PrevCard) {
           showCardImage(urls[browser.index()], browser.index(), total);
           drawAddButton(urls[browser.index()]);
+          evictOutsideCache(urls, browser.index());
         }
       }
+    } else {
+      // Idle (finger up): buffer the next card so the coming swipe is instant.
+      prefetchOne(urls, browser.index());
     }
     prev_down = down;
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -300,6 +360,7 @@ void runDeckBrowser() {
   pokedex::CardBrowser browser(static_cast<int>(urls.size()));
   showCardImage(urls[index], index, static_cast<int>(urls.size()));
   drawRemoveButton();
+  evictOutsideCache(urls, index);
 
   bool prev_down = false;
   pokedex::Point start{0, 0}, last{0, 0};
@@ -323,6 +384,7 @@ void runDeckBrowser() {
         for (int i = 0; i < index; ++i) browser.apply(pokedex::Swipe::Left);
         showCardImage(urls[index], index, static_cast<int>(urls.size()));
         drawRemoveButton();
+        evictOutsideCache(urls, index);
       } else {
         pokedex::BrowseAction act = browser.apply(swipe);
         if (act == pokedex::BrowseAction::GoHome) return;
@@ -331,8 +393,11 @@ void runDeckBrowser() {
           index = browser.index();
           showCardImage(urls[index], index, static_cast<int>(urls.size()));
           drawRemoveButton();
+          evictOutsideCache(urls, index);
         }
       }
+    } else {
+      prefetchOne(urls, index);  // buffer ahead while idle
     }
     prev_down = down;
     vTaskDelay(pdMS_TO_TICKS(20));

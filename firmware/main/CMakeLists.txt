@@ -18,6 +18,7 @@ idf_component_register(
     "${CORE_DIR}/src/gesture.cpp"
     "${CORE_DIR}/src/battery.cpp"
     "${CORE_DIR}/src/card_browser.cpp"
+    "${CORE_DIR}/src/card_prefetch.cpp"
     "${CORE_DIR}/src/deck.cpp"
     "${CORE_DIR}/src/deck_screen.cpp"
     "${CORE_DIR}/src/tcg.cpp"
