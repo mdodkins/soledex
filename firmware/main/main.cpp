@@ -222,18 +222,23 @@ std::unique_ptr<M5Canvas> decodeCard(const std::string& png) {
 
 // Return the decoded sprite for `url`, downloading + decoding and caching it on
 // a miss. Returns nullptr on a download/decode failure (not cached, so retries).
+// A miss is narrated on the bottom strip with the animated "Loading next
+// card..." dots (covering both the download and the decode); a hit is silent.
 M5Canvas* loadCard(const std::string& url) {
   auto it = s_card_cache.find(url);
   if (it != s_card_cache.end()) return it->second.get();  // hit: no work
 
+  startBusy("Loading next card", 0xFFD000u);
   std::string png;
   int status = pokedex::httpGet(url, png);
   if (status != 200 || png.empty()) {
+    stopBusy();
     ESP_LOGE(TAG, "card GET %d (%u bytes)", status, (unsigned)png.size());
     return nullptr;
   }
   int64_t t0 = esp_timer_get_time();
   auto canvas = decodeCard(png);
+  stopBusy();
   if (!canvas) return nullptr;
   ESP_LOGI(TAG, "decoded card %u bytes in %lldms (%u resident, free_heap=%u)",
            (unsigned)png.size(), (esp_timer_get_time() - t0) / 1000,
@@ -255,19 +260,16 @@ void evictOutsideCache(const std::vector<std::string>& urls, int index) {
   }
 }
 
-// Download the single highest-priority not-yet-cached card in the window around
-// `index`. Returns true if it fetched one (i.e. there is more buffering to do).
-// Called when idle so the next swipe lands on an already-resident card. The
-// download is narrated on the bottom strip with the animated "Loading next
-// card..." dots (same busy animator as the search flow).
+// Download + decode the single highest-priority not-yet-cached card in the
+// window around `index`. Returns true if it fetched one (i.e. there is more
+// buffering to do). Called when idle so the next swipe lands on an already
+// resident card. loadCard() narrates the work as "Loading next card...".
 bool prefetchOne(const std::vector<std::string>& urls, int index) {
   for (int j : pokedex::prefetchWindow(index, static_cast<int>(urls.size()),
                                        pokedex::kPrefetchBack,
                                        pokedex::kPrefetchAhead)) {
     if (s_card_cache.find(urls[j]) == s_card_cache.end()) {
-      startBusy("Loading next card", 0xFFD000u);
       loadCard(urls[j]);
-      stopBusy();
       return true;
     }
   }
