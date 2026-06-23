@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <iterator>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -10,6 +11,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -177,30 +179,67 @@ void drawCounter(int index, int total) {
   M5.Display.drawString(counter.c_str(), M5.Display.width() / 2, 16);
 }
 
-// Downloaded card PNGs, keyed by image URL, kept in PSRAM (large allocations
-// spill there automatically). std::map keeps references/pointers stable as
-// other entries are inserted or evicted, so a pointer into the cache stays valid
-// while we draw from it. Bounded to a small window around the current card by
-// evictOutsideCache().
-std::map<std::string, std::string> s_card_cache;
+// Decoded card frames, keyed by image URL: each is a full-screen sprite (the
+// card scaled-to-fit, centred, on black) held in PSRAM. We decode the PNG once
+// here so that showing a card is a fast pushSprite (DMA blit) instead of
+// re-inflating + re-scaling the PNG on every swipe. std::unique_ptr frees the
+// sprite's PSRAM buffer on eviction. Bounded to a small window around the
+// current card by evictOutsideCache().
+std::map<std::string, std::unique_ptr<M5Canvas>> s_card_cache;
 
-// Return the PNG bytes for `url`, downloading and caching them on a miss. A
-// failed download is not cached (so it retries) and returns an empty string.
-const std::string& loadCard(const std::string& url) {
+// Decode a card PNG into a fresh full-screen sprite, scaled-to-fit and centred
+// on black. Returns nullptr if the sprite can't be allocated or the PNG is bad.
+std::unique_ptr<M5Canvas> decodeCard(const std::string& png) {
+  const int disp_w = M5.Display.width();
+  const int disp_h = M5.Display.height();
+  const auto* bytes = reinterpret_cast<const uint8_t*>(png.data());
+
+  // Scale to fit while preserving aspect, then centre by computing the top-left
+  // ourselves (drawPng's datum arg doesn't position reliably here).
+  float scale = 1.0f;
+  int out_w = disp_w, out_h = disp_h;
+  auto size = pokedex::pngSize(bytes, png.size());
+  if (size && size->width > 0 && size->height > 0) {
+    float sw = static_cast<float>(disp_w) / size->width;
+    float sh = static_cast<float>(disp_h) / size->height;
+    scale = sw < sh ? sw : sh;
+    out_w = static_cast<int>(size->width * scale);
+    out_h = static_cast<int>(size->height * scale);
+  }
+  const int x = (disp_w - out_w) / 2;
+  const int y = (disp_h - out_h) / 2;
+
+  auto canvas = std::make_unique<M5Canvas>(&M5.Display);  // PSRAM, parent depth
+  canvas->setColorDepth(16);
+  if (!canvas->createSprite(disp_w, disp_h)) {
+    ESP_LOGE(TAG, "card sprite alloc failed (%dx%d)", disp_w, disp_h);
+    return nullptr;
+  }
+  canvas->fillScreen(0x000000u);
+  canvas->drawPng(bytes, png.size(), x, y, 0, 0, 0, 0, scale, scale);
+  return canvas;
+}
+
+// Return the decoded sprite for `url`, downloading + decoding and caching it on
+// a miss. Returns nullptr on a download/decode failure (not cached, so retries).
+M5Canvas* loadCard(const std::string& url) {
   auto it = s_card_cache.find(url);
-  if (it != s_card_cache.end()) return it->second;  // hit: no network
+  if (it != s_card_cache.end()) return it->second.get();  // hit: no work
 
   std::string png;
   int status = pokedex::httpGet(url, png);
   if (status != 200 || png.empty()) {
     ESP_LOGE(TAG, "card GET %d (%u bytes)", status, (unsigned)png.size());
-    static const std::string kEmpty;
-    return kEmpty;
+    return nullptr;
   }
-  ESP_LOGI(TAG, "cached card %u bytes (%u resident, free_heap=%u)",
-           (unsigned)png.size(), (unsigned)s_card_cache.size() + 1,
+  int64_t t0 = esp_timer_get_time();
+  auto canvas = decodeCard(png);
+  if (!canvas) return nullptr;
+  ESP_LOGI(TAG, "decoded card %u bytes in %lldms (%u resident, free_heap=%u)",
+           (unsigned)png.size(), (esp_timer_get_time() - t0) / 1000,
+           (unsigned)s_card_cache.size() + 1,
            (unsigned)esp_get_free_heap_size());
-  return s_card_cache.emplace(url, std::move(png)).first->second;
+  return s_card_cache.emplace(url, std::move(canvas)).first->second.get();
 }
 
 // Drop cached cards outside the prefetch window around `index`, bounding memory.
@@ -249,36 +288,25 @@ void prefetchTick(const std::vector<std::string>& urls, int index,
   }
 }
 
-// Draw a card PNG scaled-to-fit, centred, loading it from cache (or the network
-// on a miss). Returns false on a download/decode failure. The "i / N" counter is
-// shown first so the user sees which card is loading on a cache miss.
+// Show a card: blit its pre-decoded sprite (the fast path) or, on a cache miss,
+// download + decode it first. The full-screen sprite includes the black
+// background, so a cache hit is a single pushSprite with no clear/flash. On a
+// miss we clear + show the counter so the user sees which card is loading.
 bool showCardImage(const std::string& url, int index, int total) {
-  M5.Display.fillScreen(0x000000u);
-  drawCounter(index, total);
-
-  const std::string& png = loadCard(url);
-  if (png.empty()) return false;
-  const auto* bytes = reinterpret_cast<const uint8_t*>(png.data());
-  const int disp_w = M5.Display.width();
-  const int disp_h = M5.Display.height();
-
-  // Scale to fit while preserving aspect, then centre by computing the top-left
-  // ourselves (drawPng's datum arg doesn't position reliably here).
-  float scale = 1.0f;
-  int out_w = disp_w, out_h = disp_h;
-  auto size = pokedex::pngSize(bytes, png.size());
-  if (size && size->width > 0 && size->height > 0) {
-    float sw = static_cast<float>(disp_w) / size->width;
-    float sh = static_cast<float>(disp_h) / size->height;
-    scale = sw < sh ? sw : sh;
-    out_w = static_cast<int>(size->width * scale);
-    out_h = static_cast<int>(size->height * scale);
+  if (s_card_cache.find(url) == s_card_cache.end()) {
+    M5.Display.fillScreen(0x000000u);
+    drawCounter(index, total);
   }
-  const int x = (disp_w - out_w) / 2;
-  const int y = (disp_h - out_h) / 2;
-
-  M5.Display.drawPng(bytes, png.size(), x, y, 0, 0, 0, 0, scale, scale);
-  drawCounter(index, total);  // redraw on top of the card image
+  M5Canvas* card = loadCard(url);
+  if (!card) {
+    M5.Display.fillScreen(0x000000u);
+    drawCounter(index, total);
+    return false;
+  }
+  int64_t t0 = esp_timer_get_time();
+  card->pushSprite(&M5.Display, 0, 0);
+  ESP_LOGI(TAG, "blit card in %lldms", (esp_timer_get_time() - t0) / 1000);
+  drawCounter(index, total);  // dynamic, drawn live over the blitted card
   return true;
 }
 
