@@ -62,6 +62,8 @@ Credentials live in plain-text files at the project root, listed in
 |------|--------|-------|
 | `claude-api-key.txt` | the API key on one line | Anthropic API key for the Claude calls |
 | `wifi-passwords.txt` | `SSID,password` — one network per line | WiFi credentials (incl. the FritzBox) |
+| `stt-url.txt` *(optional)* | the STT URL on one line | overrides the default `https://dev.uoawen.com/stt/inference` |
+| `stt-auth.txt` *(optional)* | `user:password` on one line | basic-auth creds for the hosted STT endpoint |
 
 `wifi-passwords.txt` example:
 
@@ -83,9 +85,15 @@ python tools/voice_to_cards.py "fairy energy"
 
 The device can't run STT locally, so we host one **whisper.cpp** endpoint and
 both the host preview and the Tab5 use the same contract: POST a WAV to
-`/inference`, get the transcript back. The URL is configurable via
-`POKEDEX_STT_URL` (default `http://127.0.0.1:8080/inference`) so the service can
-move to a dedicated server later without code changes.
+`/inference`, get the transcript back. It is served on the internet at
+**`https://dev.uoawen.com/stt/inference`** behind nginx basic auth (see
+[Hosting the STT server](#hosting-the-stt-server)). The URL and credentials are
+configurable, so the service can move without code changes:
+
+- **Host tools:** `POKEDEX_STT_URL` (default `https://dev.uoawen.com/stt/inference`)
+  and `POKEDEX_STT_AUTH` (`user:password`).
+- **Tab5 firmware:** `stt-url.txt` and `stt-auth.txt` at the project root
+  (git-ignored), baked into `secrets.h` at CMake-configure time.
 
 The engine itself is **not** vendored here (it's a large external dependency).
 Set it up once — clone, build the server, and fetch the base.en model:
@@ -98,45 +106,59 @@ cmake --build build -j --target whisper-server
 ./models/download-ggml-model.sh base.en      # -> models/ggml-base.en.bin
 ```
 
-Then start the server (leave it running while you use the device):
+Start it for a quick local test (for the always-on deployment, see
+[Hosting the STT server](#hosting-the-stt-server)):
 
 ```bash
 ~/whisper.cpp/build/bin/whisper-server \
-  -m ~/whisper.cpp/models/ggml-base.en.bin -l en --host 0.0.0.0 --port 8080
-# --host 0.0.0.0 so the Tab5 can reach it over the LAN
-# (use 127.0.0.1 for host-only testing)
+  -m ~/whisper.cpp/models/ggml-base.en.bin -l en --host 127.0.0.1 --port 8080
 ```
 
-### Running it on a dedicated server (systemd)
+### Hosting the STT server
 
-To move STT off this dev machine, build whisper.cpp on the server as above
-(clone to `/opt/whisper.cpp`, fetch `base.en`), then install the unit shipped at
-[`tools/whisper-stt.service`](tools/whisper-stt.service). Adjust its `User=` and
-the `/opt/whisper.cpp` paths to match the box, then:
+whisper-server has **no auth of its own**, so to reach it over the internet we
+bind it to localhost and front it with nginx (HTTPS + basic auth). The live
+deployment serves `https://dev.uoawen.com/stt/inference`.
+
+Build whisper.cpp on the server (clone to `/opt/whisper.cpp`, fetch `base.en`),
+then run it as a localhost-bound service via the unit shipped at
+[`tools/whisper-stt.service`](tools/whisper-stt.service) (adjust `User=`/paths to
+match the box):
 
 ```bash
-# On the server (paths/user as in the unit file):
 sudo useradd --system --home /opt/whisper.cpp --shell /usr/sbin/nologin whisper
 sudo chown -R whisper: /opt/whisper.cpp
 sudo cp tools/whisper-stt.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now whisper-stt      # start now + on every boot
-
 systemctl status whisper-stt                 # check it's up
-journalctl -u whisper-stt -f                  # follow logs
-curl -F file=@recording.wav http://<server-ip>:8080/inference   # smoke test
+curl -F file=@recording.wav http://127.0.0.1:8080/inference   # local smoke test
 ```
 
-Then re-point the two clients at the server's address (nothing else changes —
-the `/inference` contract is identical):
+Front it with nginx using the snippet at
+[`tools/nginx-soledex-stt.conf`](tools/nginx-soledex-stt.conf) (add the
+`location /stt/` block to your domain's HTTPS server, create the
+`.htpasswd-soledex` credential file as documented in the snippet, reload nginx):
 
-- **Host tools:** `export POKEDEX_STT_URL="http://<server-ip>:8080/inference"`
-- **Tab5 firmware:** put `http://<server-ip>:8080/inference` in `stt-url.txt`
-  (git-ignored, project root). It's baked into `secrets.h` at CMake-configure
-  time — rebuild and flash the firmware to apply.
+```bash
+curl -u user:password https://your-domain/stt/inference -F file=@recording.wav
+```
 
-Open port 8080 to the LAN only (e.g. `sudo ufw allow from 192.168.0.0/16 to any
-port 8080`); whisper-server has no auth, so don't expose it to the internet.
+Use a **real (Let's Encrypt) cert** for the domain — the Tab5 verifies the
+endpoint against the Mozilla CA bundle, so a self-signed cert is rejected
+on-device (`certbot certonly --webroot -w /var/www/html -d your-domain`).
+
+Then point the clients at the endpoint (the `/inference` contract is identical):
+
+- **Host tools:** `export POKEDEX_STT_URL="https://dev.uoawen.com/stt/inference"`
+  and `export POKEDEX_STT_AUTH="user:password"`.
+- **Tab5 firmware:** put the URL in `stt-url.txt` and `user:password` in
+  `stt-auth.txt` (both git-ignored, project root). They are baked into
+  `secrets.h` at CMake-configure time — rebuild and flash to apply.
+
+> For a LAN-only box instead, bind whisper-server to `0.0.0.0`, firewall port
+> 8080 to the local subnet (`sudo ufw allow from 192.168.0.0/16 to any port
+> 8080`), skip nginx, and leave `stt-auth.txt`/`POKEDEX_STT_AUTH` unset.
 
 Transcribe, or run the full chain from a recording:
 

@@ -24,12 +24,22 @@ string(SUBSTRING "${_line}" 0 ${_comma} _ssid)
 math(EXPR _pw_start "${_comma}+1")
 string(SUBSTRING "${_line}" ${_pw_start} -1 _pw)
 
-# --- STT endpoint (optional stt-url.txt, else default to this dev box) ---
+# --- STT endpoint (optional stt-url.txt, else the hosted internet endpoint) ---
 if(EXISTS "${_root}/stt-url.txt")
   file(READ "${_root}/stt-url.txt" _stt)
   string(STRIP "${_stt}" _stt)
 else()
-  set(_stt "http://192.168.178.83:8080/inference")
+  set(_stt "https://dev.uoawen.com/stt/inference")
+endif()
+
+# --- STT basic-auth (optional stt-auth.txt = "user:password") ---
+# The hosted endpoint sits behind nginx basic auth; a no-auth LAN box leaves
+# this empty and the firmware sends no Authorization header.
+if(EXISTS "${_root}/stt-auth.txt")
+  file(READ "${_root}/stt-auth.txt" _stt_auth)
+  string(STRIP "${_stt_auth}" _stt_auth)
+else()
+  set(_stt_auth "")
 endif()
 
 file(WRITE "${_out}"
@@ -40,5 +50,6 @@ file(WRITE "${_out}"
 #define WIFI_PASSWORD \"${_pw}\"
 #define ANTHROPIC_API_KEY \"${_api}\"
 #define STT_URL \"${_stt}\"
+#define STT_AUTH \"${_stt_auth}\"
 ")
 message(STATUS "Generated secrets.h (SSID='${_ssid}', STT_URL='${_stt}')")

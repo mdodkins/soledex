@@ -25,6 +25,7 @@ core/         Pure C++17, no hardware deps. Unit-tested with GoogleTest.
   gesture          detectSwipe()  (start/end -> Left/Right/Up/Down)
   card_browser     CardBrowser  (swipe -> next/prev card, up -> home)
   tcg              tcgQueryUrl()  (CardQuery -> pokemontcg.io URL, encoded)
+  base64           base64Encode() / basicAuthHeader()  (STT HTTPS basic auth)
 tools/voice_to_cards.py   host pipeline: phrase -> Claude -> TCG -> images
 host/         SDL2 backend (SdlDisplay): a window for dev + offscreen→PNG.
   main_sdl.cpp     host preview app
@@ -166,11 +167,14 @@ Card data source: **pokemontcg.io** REST API (rich query + hi-res images).
   see `firmware/components/m5gfx/PATCH_NOTES.md`. Not upstreamed (by request).
 
 ### Pending decisions / blockers
-- **Keep the STT server running** on the dev box bound to `--host 0.0.0.0`
-  (reachable at `192.168.178.83:8080`). When it moves to a real server, update
-  `stt-url.txt` (and `POKEDEX_STT_URL` for the host) and rebuild.
-- All previously-blocking items resolved: API key present, STT running on LAN,
-  WiFi connects on-device, pokemontcg.io reachable.
+- **STT is hosted on the internet** at `https://dev.uoawen.com/stt/inference`:
+  whisper.cpp bound to localhost, fronted by nginx (HTTPS + basic auth, real
+  Let's Encrypt cert so the device's CA-bundle verification passes). Clients
+  authenticate with `stt-auth.txt` / `POKEDEX_STT_AUTH` (`user:password`). The
+  firmware sends `Authorization: Basic …` only when `STT_AUTH` is non-empty, so
+  a no-auth LAN box still works unchanged. See README "Hosting the STT server".
+- All previously-blocking items resolved: API key present, STT live on the
+  internet, WiFi connects on-device, pokemontcg.io reachable.
 
 ---
 

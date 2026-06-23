@@ -83,6 +83,8 @@ def main() -> int:
     ap.add_argument("phrase", nargs="?", help="the spoken phrase (or use --wav)")
     ap.add_argument("--wav", help="WAV file to transcribe via the STT server first")
     ap.add_argument("--stt-url", default=stt_client.DEFAULT_STT_URL)
+    ap.add_argument("--stt-auth", default=stt_client.DEFAULT_STT_AUTH,
+                    help='STT basic auth as "user:password" (default: $POKEDEX_STT_AUTH)')
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--download", metavar="DIR", help="download card images here")
     ap.add_argument("--query", help="skip Claude; use this q= directly")
@@ -90,7 +92,7 @@ def main() -> int:
 
     # Full chain entry point: a recording becomes the phrase via STT.
     if args.wav and not args.phrase:
-        args.phrase = stt_client.transcribe(args.wav, args.stt_url)
+        args.phrase = stt_client.transcribe(args.wav, args.stt_url, auth=args.stt_auth)
         print(f'transcribed: "{args.phrase}"')
     if not args.phrase:
         ap.error("provide a phrase or --wav")

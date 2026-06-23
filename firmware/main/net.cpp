@@ -8,6 +8,7 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "pokedex/base64.h"
 #include "pokedex/tcg.h"
 #include "pokedex/wav.h"
 #include "secrets.h"
@@ -96,10 +97,18 @@ bool sttTranscribe(const int16_t* pcm, std::size_t samples, uint32_t sampleRate,
           "\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\n"
           "json\r\n--" + boundary + "--\r\n";
 
+  // The STT endpoint is fronted by HTTPS basic auth when served over the
+  // internet (STT_AUTH = "user:pass"). On a no-auth LAN box STT_AUTH is empty
+  // and basicAuthHeader() returns "", so we send no Authorization header.
+  std::vector<std::pair<std::string, std::string>> headers = {
+      {"Content-Type", "multipart/form-data; boundary=" + boundary}};
+  if (const std::string auth = basicAuthHeader(STT_AUTH); !auth.empty()) {
+    headers.push_back({"Authorization", auth});
+  }
+
   std::string resp;
-  int status = httpDo(HTTP_METHOD_POST, STT_URL,
-                      {{"Content-Type", "multipart/form-data; boundary=" + boundary}},
-                      body.data(), body.size(), resp);
+  int status = httpDo(HTTP_METHOD_POST, STT_URL, headers, body.data(),
+                      body.size(), resp);
   if (status != 200) {
     ESP_LOGE(TAG, "STT HTTP %d", status);
     return false;
