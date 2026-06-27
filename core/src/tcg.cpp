@@ -25,11 +25,45 @@ std::string urlEncode(const std::string& value) {
   return out;
 }
 
+std::string cardIdFromImageUrl(const std::string& url) {
+  std::size_t slash = url.rfind('/');
+  if (slash == std::string::npos || slash == 0) return "";
+  std::string file = url.substr(slash + 1);
+  std::size_t prev = url.rfind('/', slash - 1);
+  if (prev == std::string::npos) return "";
+  std::string set = url.substr(prev + 1, slash - prev - 1);
+
+  // Strip ".png" then a trailing "_hires" to leave the card number.
+  const std::string png = ".png";
+  if (file.size() >= png.size() &&
+      file.compare(file.size() - png.size(), png.size(), png) == 0) {
+    file.erase(file.size() - png.size());
+  }
+  const std::string hires = "_hires";
+  if (file.size() >= hires.size() &&
+      file.compare(file.size() - hires.size(), hires.size(), hires) == 0) {
+    file.erase(file.size() - hires.size());
+  }
+  if (set.empty() || file.empty()) return "";
+  return set + "-" + file;
+}
+
+std::string tcgIdQuery(const std::vector<std::string>& ids) {
+  std::string q;
+  for (const auto& id : ids) {
+    if (!q.empty()) q += " OR ";
+    q += "id:" + id;
+  }
+  return q;
+}
+
 std::string tcgQueryUrl(const std::string& query, int pageSize) {
-  // select=images trims the response to just image URLs (not full card data),
-  // keeping it small enough to download + parse on-device without exhausting RAM.
+  // select trims the response to the image URL plus the type metadata the deck
+  // sorts by (name/supertype/subtypes), not full card data — keeping it small
+  // enough to download + parse on-device without exhausting RAM.
   return "https://api.pokemontcg.io/v2/cards?q=" + urlEncode(query) +
-         "&pageSize=" + std::to_string(pageSize) + "&select=images";
+         "&pageSize=" + std::to_string(pageSize) +
+         "&select=images,name,supertype,subtypes,evolvesFrom";
 }
 
 }  // namespace pokedex

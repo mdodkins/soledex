@@ -21,6 +21,8 @@ idf_component_register(
     "${CORE_DIR}/src/card_prefetch.cpp"
     "${CORE_DIR}/src/deck.cpp"
     "${CORE_DIR}/src/deck_screen.cpp"
+    "${CORE_DIR}/src/deck_sort.cpp"
+    "${CORE_DIR}/src/deck_view.cpp"
     "${CORE_DIR}/src/tcg.cpp"
     "${CORE_DIR}/src/wav.cpp"
     "${CORE_DIR}/src/keyboard.cpp"

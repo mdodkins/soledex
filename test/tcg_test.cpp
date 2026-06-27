@@ -4,6 +4,8 @@
 
 namespace {
 
+using pokedex::cardIdFromImageUrl;
+using pokedex::tcgIdQuery;
 using pokedex::tcgQueryUrl;
 using pokedex::urlEncode;
 
@@ -20,18 +22,42 @@ TEST(TcgTest, UrlEncodeEncodesWildcard) {
 }
 
 TEST(TcgTest, BuildsCardSearchUrl) {
-  // select=images keeps the response tiny (only image URLs, not full card data)
-  // so the on-device cJSON parse stays well within memory.
+  // select trims the response to the image URL plus the type metadata the deck
+  // sorts by (name/supertype/subtypes), keeping the on-device cJSON parse small.
   EXPECT_EQ(tcgQueryUrl("types:fairy", 20),
             "https://api.pokemontcg.io/v2/cards?q=types%3Afairy&pageSize=20"
-            "&select=images");
+            "&select=images,name,supertype,subtypes,evolvesFrom");
 }
 
 TEST(TcgTest, BuildsUrlForCompoundQuery) {
   EXPECT_EQ(
       tcgQueryUrl("supertype:energy types:fairy", 12),
       "https://api.pokemontcg.io/v2/cards?q=supertype%3Aenergy%20types%3Afairy"
-      "&pageSize=12&select=images");
+      "&pageSize=12&select=images,name,supertype,subtypes,evolvesFrom");
+}
+
+TEST(TcgTest, RecoversCardIdFromImageUrl) {
+  EXPECT_EQ(cardIdFromImageUrl(
+                "https://images.pokemontcg.io/xyp/XY04_hires.png"),
+            "xyp-XY04");
+  EXPECT_EQ(cardIdFromImageUrl("https://images.pokemontcg.io/pop4/9_hires.png"),
+            "pop4-9");
+}
+
+TEST(TcgTest, RecoversCardIdWithoutHiresSuffix) {
+  EXPECT_EQ(cardIdFromImageUrl("https://images.pokemontcg.io/base1/4.png"),
+            "base1-4");
+}
+
+TEST(TcgTest, CardIdIsEmptyForUnparseableUrl) {
+  EXPECT_EQ(cardIdFromImageUrl(""), "");
+  EXPECT_EQ(cardIdFromImageUrl("notaurl"), "");
+}
+
+TEST(TcgTest, BuildsIdQueryFromIds) {
+  EXPECT_EQ(tcgIdQuery({"xyp-XY04", "pop4-9"}), "id:xyp-XY04 OR id:pop4-9");
+  EXPECT_EQ(tcgIdQuery({"base1-4"}), "id:base1-4");
+  EXPECT_EQ(tcgIdQuery({}), "");
 }
 
 }  // namespace

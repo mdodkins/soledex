@@ -17,6 +17,8 @@ add_library(pokedex_core
   core/src/battery.cpp
   core/src/deck.cpp
   core/src/deck_screen.cpp
+  core/src/deck_sort.cpp
+  core/src/deck_view.cpp
   core/src/tcg.cpp
   core/src/wav.cpp
   core/src/keyboard.cpp
@@ -40,6 +42,8 @@ add_executable(pokedex_tests
   test/battery_test.cpp
   test/deck_test.cpp
   test/deck_screen_test.cpp
+  test/deck_sort_test.cpp
+  test/deck_view_test.cpp
   test/tcg_test.cpp
   test/wav_test.cpp
   test/keyboard_test.cpp

@@ -24,12 +24,15 @@
 #include "pokedex/card_prefetch.h"
 #include "pokedex/deck.h"
 #include "pokedex/deck_screen.h"
+#include "pokedex/deck_sort.h"
+#include "pokedex/deck_view.h"
 #include "pokedex/gesture.h"
 #include "pokedex/hit_test.h"
 #include "pokedex/home_screen.h"
 #include "pokedex/keyboard.h"
 #include "pokedex/png_info.h"
 #include "pokedex/render.h"
+#include "pokedex/tcg.h"
 #include "secrets.h"
 #include "wifi.h"
 
@@ -68,6 +71,15 @@ pokedex::Deck s_deck;
 constexpr char kDeckNvsPartition[] = "deck_nvs";
 constexpr char kDeckNvsNamespace[] = "pokedex";
 constexpr char kDeckNvsKey[] = "deck";
+// Schema tag for the saved card metadata. Bump it whenever the set of fetched
+// fields changes so the deck triggers a one-time backfill of the new field for
+// cards saved under the old schema (e.g. evolvesFrom, added after supertype).
+constexpr char kDeckSchemaKey[] = "schema";
+constexpr char kDeckSchema[] = "v2-evo";
+// Set at load time when the saved schema is older than kDeckSchema: the next
+// time the deck opens, backfill refetches metadata for *every* card, not just
+// those missing a supertype.
+bool s_deckNeedsRefetch = false;
 
 // Bring up the dedicated deck partition. If it is brand new (first flash) or its
 // pages are exhausted, format just THIS partition — never the system nvs.
@@ -93,8 +105,29 @@ void loadDeck() {
       s_deck = pokedex::Deck::deserialize(std::string(buf.data()));
     }
   }
+  // Decide whether the saved metadata predates the current schema; if so the
+  // next deck open refetches every card to fill in newly-added fields.
+  char schema[16] = {};
+  std::size_t slen = sizeof(schema);
+  bool current = nvs_get_str(h, kDeckSchemaKey, schema, &slen) == ESP_OK &&
+                 std::string(schema) == kDeckSchema;
+  s_deckNeedsRefetch = s_deck.size() > 0 && !current;
   nvs_close(h);
-  ESP_LOGI(TAG, "loaded deck: %d card(s)", s_deck.size());
+  ESP_LOGI(TAG, "loaded deck: %d card(s), schema=%s refetch=%d", s_deck.size(),
+           schema[0] ? schema : "(none)", s_deckNeedsRefetch);
+}
+
+// Record that the saved metadata now matches the current schema, so the deck
+// won't refetch again on the next open.
+void markDeckSchemaCurrent() {
+  nvs_handle_t h;
+  if (nvs_open_from_partition(kDeckNvsPartition, kDeckNvsNamespace,
+                              NVS_READWRITE, &h) != ESP_OK) {
+    return;
+  }
+  nvs_set_str(h, kDeckSchemaKey, kDeckSchema);
+  nvs_commit(h);
+  nvs_close(h);
 }
 
 void saveDeck() {
@@ -187,6 +220,10 @@ void drawCounter(int index, int total) {
 // current card by evictOutsideCache().
 std::map<std::string, std::unique_ptr<M5Canvas>> s_card_cache;
 
+// What a card-load miss narrates on the status strip. "Loading next card" while
+// browsing one at a time; "Loading 4 cards" in the deck's 2x2 grid view.
+std::string s_cardLoadLabel = "Loading next card";
+
 // Decode a card PNG into a fresh full-screen sprite, scaled-to-fit and centred
 // on black. Returns nullptr if the sprite can't be allocated or the PNG is bad.
 std::unique_ptr<M5Canvas> decodeCard(const std::string& png) {
@@ -228,7 +265,7 @@ M5Canvas* loadCard(const std::string& url) {
   auto it = s_card_cache.find(url);
   if (it != s_card_cache.end()) return it->second.get();  // hit: no work
 
-  startBusy("Loading next card", 0xFFD000u);
+  startBusy(s_cardLoadLabel.c_str(), 0xFFD000u);
   std::string png;
   int status = pokedex::httpGet(url, png);
   if (status != 200 || png.empty()) {
@@ -247,6 +284,13 @@ M5Canvas* loadCard(const std::string& url) {
   return s_card_cache.emplace(url, std::move(canvas)).first->second.get();
 }
 
+// Drop every cached card whose URL isn't in `keep`, bounding memory.
+void keepOnlyCached(const std::set<std::string>& keep) {
+  for (auto it = s_card_cache.begin(); it != s_card_cache.end();) {
+    it = keep.count(it->first) ? std::next(it) : s_card_cache.erase(it);
+  }
+}
+
 // Drop cached cards outside the prefetch window around `index`, bounding memory.
 void evictOutsideCache(const std::vector<std::string>& urls, int index) {
   std::set<std::string> keep;
@@ -255,9 +299,20 @@ void evictOutsideCache(const std::vector<std::string>& urls, int index) {
                                        pokedex::kPrefetchAhead)) {
     keep.insert(urls[j]);
   }
-  for (auto it = s_card_cache.begin(); it != s_card_cache.end();) {
-    it = keep.count(it->first) ? std::next(it) : s_card_cache.erase(it);
+  keepOnlyCached(keep);
+}
+
+// Keep the current grid page and the next one resident (eight cards), so the
+// idle prefetch of the next page survives until the user swipes to it.
+void evictOutsideGrid(const std::vector<std::string>& urls, int page) {
+  std::set<std::string> keep;
+  int base = pokedex::cardIndexAt(page, 0);
+  for (int i = base; i < base + 2 * pokedex::kGridCells &&
+                     i < static_cast<int>(urls.size());
+       ++i) {
+    keep.insert(urls[i]);
   }
+  keepOnlyCached(keep);
 }
 
 // Download + decode the single highest-priority not-yet-cached card in the
@@ -314,9 +369,8 @@ bool showCardImage(const std::string& url, int index, int total) {
 
 // Draw one of the rounded-rect deck buttons that overlay a card image, centring
 // `label` in it. Matches the keyboard keys' look.
-void drawDeckButton(pokedex::Point origin, const char* label, uint32_t fill,
-                    int text_size) {
-  const auto s = pokedex::kDeckButtonSize;
+void drawDeckButton(pokedex::Point origin, pokedex::ImageSize s,
+                    const char* label, uint32_t fill, int text_size) {
   M5.Display.fillRoundRect(origin.x, origin.y, s.width, s.height, 14, fill);
   M5.Display.setTextColor(0xFFFFFFu);
   M5.Display.setTextSize(text_size);
@@ -329,28 +383,99 @@ void drawDeckButton(pokedex::Point origin, const char* label, uint32_t fill,
 void drawAddButton(const std::string& url) {
   bool added = s_deck.contains(url);
   drawDeckButton(pokedex::addButtonOrigin(M5.Display.width()),
-                 pokedex::addButtonLabel(s_deck, url),
+                 pokedex::kDeckButtonSize, pokedex::addButtonLabel(s_deck, url),
                  added ? 0x404040u : 0x107C10u, added ? 4 : 7);
 }
 
 // The "-" remove button, top-left, shown only while viewing the deck.
 void drawRemoveButton() {
-  drawDeckButton(pokedex::removeButtonOrigin(), "-", 0xA01010u, 7);
+  drawDeckButton(pokedex::removeButtonOrigin(), pokedex::kDeckButtonSize, "-",
+                 0xA01010u, 7);
 }
 
-// True if a release at `last` (with no swipe) was a tap inside `origin`'s
-// deck-button rectangle.
-bool tappedButton(pokedex::Point origin, pokedex::Swipe swipe,
-                  pokedex::Point last) {
+// True if a release at `last` (with no swipe) was a tap inside the button
+// rectangle at `origin` with size `size`.
+bool tappedButton(pokedex::Point origin, pokedex::ImageSize size,
+                  pokedex::Swipe swipe, pokedex::Point last) {
   return swipe == pokedex::Swipe::None &&
-         pokedex::contains(origin, pokedex::kDeckButtonSize, last);
+         pokedex::contains(origin, size, last);
+}
+
+// The "4 cards" / "1 card" view-toggle button, top-right, shown only while
+// viewing the deck. It sits where the results browser's "+" button would be,
+// which is free in the deck screen (that screen uses the top-left "-" instead).
+void drawViewToggleButton(pokedex::DeckViewMode mode) {
+  drawDeckButton(pokedex::viewToggleButtonOrigin(M5.Display.width()),
+                 pokedex::kViewToggleButtonSize, pokedex::viewToggleLabel(mode),
+                 0x303030u, 4);
+}
+
+// Draw one deck card scaled-to-fit, centred in a grid cell. Reuses the decoded
+// full-screen sprite cache (so the prefetch/eviction machinery applies) and
+// zoom-blits it down into the cell.
+void drawCardInCell(const std::string& url, pokedex::Rect cell) {
+  M5Canvas* card = loadCard(url);
+  if (!card) return;
+  float zx = static_cast<float>(cell.size.width) / card->width();
+  float zy = static_cast<float>(cell.size.height) / card->height();
+  float z = zx < zy ? zx : zy;
+  card->pushRotateZoom(&M5.Display, cell.origin.x + cell.size.width / 2,
+                       cell.origin.y + cell.size.height / 2, 0.0f, z, z);
+}
+
+// Render the 2x2 grid page for the deck: up to four cards from `page`, the
+// "i / N" counter (i = the page's first card), then the "1 card" toggle on top.
+// Keeps this page and the next resident so the prefetched page survives.
+void showGridPage(const std::vector<std::string>& urls, int page) {
+  M5.Display.fillScreen(0x000000u);
+  auto cells = pokedex::gridCells(M5.Display.width(), M5.Display.height());
+  int base = pokedex::cardIndexAt(page, 0);
+  for (int c = 0; c < pokedex::kGridCells; ++c) {
+    int idx = base + c;
+    if (idx < static_cast<int>(urls.size())) drawCardInCell(urls[idx], cells[c]);
+  }
+  evictOutsideGrid(urls, page);
+  drawCounter(base, static_cast<int>(urls.size()));  // "1 / N", "5 / N", ...
+  drawViewToggleButton(pokedex::DeckViewMode::Grid);
+}
+
+// Download + decode the first not-yet-cached card of the page *after* `page`, so
+// swiping forward in the grid lands on an already-resident page. Returns true if
+// it fetched one (more buffering to do).
+bool gridPrefetchOne(const std::vector<std::string>& urls, int page) {
+  int next = pokedex::cardIndexAt(page + 1, 0);
+  for (int i = next;
+       i < next + pokedex::kGridCells && i < static_cast<int>(urls.size());
+       ++i) {
+    if (s_card_cache.find(urls[i]) == s_card_cache.end()) {
+      loadCard(urls[i]);
+      return true;
+    }
+  }
+  return false;
+}
+
+// One idle buffering step for the grid, narrated as "Loading 4 cards..." then
+// "Next 4 loaded!" once the following page is fully resident.
+void gridPrefetchTick(const std::vector<std::string>& urls, int page,
+                      bool& buffering) {
+  if (gridPrefetchOne(urls, page)) {
+    buffering = true;
+  } else if (buffering) {
+    showStatus("Next 4 loaded!", 0x30FF30u);
+    buffering = false;
+  }
 }
 
 // Show the result cards and let the user swipe: left/right between cards, up to
 // return to the home screen. Tapping the top-right "+" adds the current card to
 // the deck (button then reads "Added").
-void runResultsBrowser(const std::vector<std::string>& urls) {
-  const int total = static_cast<int>(urls.size());
+void runResultsBrowser(const std::vector<pokedex::Card>& cards) {
+  s_cardLoadLabel = "Loading next card";
+  const int total = static_cast<int>(cards.size());
+  std::vector<std::string> urls;
+  urls.reserve(total);
+  for (const auto& c : cards) urls.push_back(c.url);
   const pokedex::Point add_origin =
       pokedex::addButtonOrigin(M5.Display.width());
   pokedex::CardBrowser browser(total);
@@ -370,8 +495,8 @@ void runResultsBrowser(const std::vector<std::string>& urls) {
       if (!prev_down) start = last;
     } else if (prev_down) {
       pokedex::Swipe swipe = pokedex::detectSwipe(start, last, 60);
-      if (tappedButton(add_origin, swipe, last)) {
-        s_deck.add(urls[browser.index()]);
+      if (tappedButton(add_origin, pokedex::kDeckButtonSize, swipe, last)) {
+        s_deck.add(cards[browser.index()]);  // full metadata for type-sorting
         saveDeck();
         drawAddButton(urls[browser.index()]);  // now "Added"
       } else {
@@ -394,11 +519,90 @@ void runResultsBrowser(const std::vector<std::string>& urls) {
   }
 }
 
-// Browse the deck the same way (swipe left/right, up to go home). Tapping the
-// top-left "-" removes the current card; the deck shrinks live and we drop back
-// home once it is empty.
+// One-time metadata backfill for legacy deck cards (saved before we captured
+// type info). For each card missing a supertype we recover its pokemontcg.io id
+// from the image URL, batch-query the API (in chunks to keep the URL short),
+// and fill in name/supertype/subtype matched by image URL. Persisted so it runs
+// at most once per card; silently leaves a card unsorted if the fetch fails
+// (e.g. offline) so the deck still opens.
+void backfillDeckMetadata() {
+  // Map each card id -> its stored deck URL, for cards still missing metadata.
+  // Matching fetched results back by id (not raw URL) is robust to any URL
+  // formatting differences between what we saved and what the API returns.
+  std::map<std::string, std::string> idToUrl;
+  for (const auto& c : s_deck.records()) {
+    // Refetch everything on a schema bump (to fill newly-added fields like
+    // evolvesFrom); otherwise only cards with no metadata at all.
+    if (!s_deckNeedsRefetch && !c.supertype.empty()) continue;
+    std::string id = pokedex::cardIdFromImageUrl(c.url);
+    if (!id.empty()) idToUrl[id] = c.url;
+  }
+  if (idToUrl.empty()) {
+    if (s_deckNeedsRefetch) {  // nothing to fetch but schema still stale
+      markDeckSchemaCurrent();
+      s_deckNeedsRefetch = false;
+    }
+    return;
+  }
+
+  std::vector<std::string> ids;
+  ids.reserve(idToUrl.size());
+  for (const auto& kv : idToUrl) ids.push_back(kv.first);
+  ESP_LOGI(TAG, "backfill: %u cards need metadata", (unsigned)ids.size());
+
+  startBusy("Sorting deck", 0xFFD000u);
+  int matched = 0;
+  bool fetchOk = true;
+  constexpr int kChunk = 15;  // keep the `id:a OR id:b ...` query URL short
+  for (std::size_t i = 0; i < ids.size(); i += kChunk) {
+    std::size_t end = i + kChunk < ids.size() ? i + kChunk : ids.size();
+    std::vector<std::string> chunk(ids.begin() + i, ids.begin() + end);
+    std::vector<pokedex::Card> cards;
+    if (!pokedex::tcgFetchCards(pokedex::tcgIdQuery(chunk),
+                                static_cast<int>(chunk.size()), cards)) {
+      ESP_LOGW(TAG, "backfill: fetch failed for chunk at %u", (unsigned)i);
+      fetchOk = false;
+      continue;
+    }
+    for (const auto& fetched : cards) {
+      std::string id = pokedex::cardIdFromImageUrl(fetched.url);
+      auto it = idToUrl.find(id);
+      if (it == idToUrl.end()) continue;
+      pokedex::Card c = fetched;
+      c.url = it->second;  // keep the deck's stored URL as the identity
+      if (s_deck.update(c)) ++matched;
+    }
+  }
+  stopBusy();
+  ESP_LOGI(TAG, "backfill: filled %d/%u cards (fetchOk=%d)", matched,
+           (unsigned)ids.size(), fetchOk);
+  if (matched > 0) saveDeck();
+  // Only advance the schema once the whole deck was fetched without error, so a
+  // transient failure (e.g. offline) retries on the next open instead of
+  // leaving cards permanently unsorted.
+  if (fetchOk) {
+    markDeckSchemaCurrent();
+    s_deckNeedsRefetch = false;
+  }
+}
+
+// Browse the deck. The cards are grouped by type (Pokémon first, alphabetical,
+// then Supporter / Item / Other, Energy last). Two views, switched by the
+// top-right "4 cards" / "1 card" button:
+//  - Single: one card at a time. Swipe left/right between cards, up to go home.
+//    Tapping the top-left "-" removes the current card (deck shrinks live; we
+//    drop home once it empties).
+//  - Grid: a 2x2 page of four cards. Swipe left/right to page, up to go home.
+//    Tapping a card opens it full-screen (back to Single on that card).
 void runDeckBrowser() {
-  std::vector<std::string> urls = s_deck.cards();  // snapshot
+  // Fill in type metadata for any legacy cards, then snapshot the deck sorted
+  // by type; we browse the sorted URLs.
+  backfillDeckMetadata();
+  s_cardLoadLabel = "Loading 4 cards";  // the deck opens in the 2x2 grid view
+  std::vector<pokedex::Card> sorted = pokedex::sortDeckByType(s_deck.records());
+  std::vector<std::string> urls;
+  urls.reserve(sorted.size());
+  for (const auto& c : sorted) urls.push_back(c.url);
   if (urls.empty()) {
     M5.Display.fillScreen(0x000000u);
     showStatus("Deck is empty", 0xFFD000u);
@@ -406,11 +610,27 @@ void runDeckBrowser() {
     return;
   }
   const pokedex::Point remove_origin = pokedex::removeButtonOrigin();
+  const pokedex::Point toggle_origin =
+      pokedex::viewToggleButtonOrigin(M5.Display.width());
+  pokedex::DeckViewMode mode = pokedex::DeckViewMode::Grid;  // open in grid view
   int index = 0;
+  int page = 0;
   pokedex::CardBrowser browser(static_cast<int>(urls.size()));
-  showCardImage(urls[index], index, static_cast<int>(urls.size()));
-  drawRemoveButton();
-  evictOutsideCache(urls, index);
+
+  // Redraw the single-card view (image + remove + view-toggle buttons).
+  auto drawSingle = [&]() {
+    showCardImage(urls[index], index, static_cast<int>(urls.size()));
+    drawRemoveButton();
+    drawViewToggleButton(pokedex::DeckViewMode::Single);
+    evictOutsideCache(urls, index);
+  };
+  // Rebuild the swipe browser so its index matches `index`.
+  auto syncBrowser = [&]() {
+    browser = pokedex::CardBrowser(static_cast<int>(urls.size()));
+    for (int i = 0; i < index; ++i) browser.apply(pokedex::Swipe::Left);
+  };
+
+  showGridPage(urls, page);  // open in the 2x2 grid view
 
   bool prev_down = false;
   bool buffering = false;
@@ -424,33 +644,73 @@ void runDeckBrowser() {
       if (!prev_down) start = last;
     } else if (prev_down) {
       pokedex::Swipe swipe = pokedex::detectSwipe(start, last, 60);
-      if (tappedButton(remove_origin, swipe, last)) {
-        s_deck.remove(urls[index]);
-        saveDeck();
-        urls.erase(urls.begin() + index);
-        if (urls.empty()) return;  // deck emptied -> back home
-        if (index >= static_cast<int>(urls.size())) index = urls.size() - 1;
-        // Rebuild the browser for the new count, re-advanced to `index`.
-        browser = pokedex::CardBrowser(static_cast<int>(urls.size()));
-        for (int i = 0; i < index; ++i) browser.apply(pokedex::Swipe::Left);
-        showCardImage(urls[index], index, static_cast<int>(urls.size()));
-        drawRemoveButton();
-        evictOutsideCache(urls, index);
+      if (tappedButton(toggle_origin, pokedex::kViewToggleButtonSize, swipe,
+                       last)) {
+        mode = pokedex::toggle(mode);
+        if (mode == pokedex::DeckViewMode::Grid) {
+          s_cardLoadLabel = "Loading 4 cards";
+          page = index / pokedex::kGridCells;
+          showGridPage(urls, page);
+        } else {
+          s_cardLoadLabel = "Loading next card";
+          // Land on the first card of the page we were viewing.
+          index = pokedex::cardIndexAt(page, 0);
+          if (index >= static_cast<int>(urls.size())) index = urls.size() - 1;
+          syncBrowser();
+          drawSingle();
+        }
         buffering = false;
-      } else {
-        pokedex::BrowseAction act = browser.apply(swipe);
-        if (act == pokedex::BrowseAction::GoHome) return;
-        if (act == pokedex::BrowseAction::NextCard ||
-            act == pokedex::BrowseAction::PrevCard) {
-          index = browser.index();
-          showCardImage(urls[index], index, static_cast<int>(urls.size()));
-          drawRemoveButton();
-          evictOutsideCache(urls, index);
+      } else if (mode == pokedex::DeckViewMode::Single) {
+        if (tappedButton(remove_origin, pokedex::kDeckButtonSize, swipe,
+                         last)) {
+          s_deck.remove(urls[index]);
+          saveDeck();
+          urls.erase(urls.begin() + index);
+          if (urls.empty()) return;  // deck emptied -> back home
+          if (index >= static_cast<int>(urls.size())) index = urls.size() - 1;
+          syncBrowser();
+          drawSingle();
           buffering = false;
+        } else {
+          pokedex::BrowseAction act = browser.apply(swipe);
+          if (act == pokedex::BrowseAction::GoHome) return;
+          if (act == pokedex::BrowseAction::NextCard ||
+              act == pokedex::BrowseAction::PrevCard) {
+            index = browser.index();
+            drawSingle();
+            buffering = false;
+          }
+        }
+      } else {  // Grid mode
+        if (swipe == pokedex::Swipe::None) {
+          int cell = pokedex::gridCellAt(M5.Display.width(),
+                                         M5.Display.height(), last);
+          int idx = cell >= 0 ? pokedex::cardIndexAt(page, cell) : -1;
+          if (idx >= 0 && idx < static_cast<int>(urls.size())) {
+            mode = pokedex::DeckViewMode::Single;
+            s_cardLoadLabel = "Loading next card";
+            index = idx;
+            syncBrowser();
+            drawSingle();
+          }
+        } else if (swipe == pokedex::Swipe::Up) {
+          return;  // go home
+        } else if (swipe == pokedex::Swipe::Left) {
+          if (page + 1 < pokedex::gridPageCount(urls.size())) {
+            ++page;
+            showGridPage(urls, page);
+          }
+        } else if (swipe == pokedex::Swipe::Right) {
+          if (page > 0) {
+            --page;
+            showGridPage(urls, page);
+          }
         }
       }
+    } else if (mode == pokedex::DeckViewMode::Single) {
+      prefetchTick(urls, index, buffering);  // buffer the next card while idle
     } else {
-      prefetchTick(urls, index, buffering);  // buffer ahead while idle
+      gridPrefetchTick(urls, page, buffering);  // buffer the next 4 while idle
     }
     prev_down = down;
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -474,16 +734,16 @@ void runSearchForPhrase(const std::string& phrase) {
   ESP_LOGI(TAG, "query: %s", query.c_str());
 
   startBusy("Finding cards", 0xFFD000u);
-  std::vector<std::string> urls;
-  ok = pokedex::tcgFetchImageUrls(query, kMaxCards, urls);
+  std::vector<pokedex::Card> cards;
+  ok = pokedex::tcgFetchCards(query, kMaxCards, cards);
   stopBusy();
-  if (!ok || urls.empty()) {
+  if (!ok || cards.empty()) {
     showStatus("No cards found", 0xFF3030u);
     vTaskDelay(pdMS_TO_TICKS(1500));
     return;
   }
-  ESP_LOGI(TAG, "found %u cards", (unsigned)urls.size());
-  runResultsBrowser(urls);  // returns on swipe-up
+  ESP_LOGI(TAG, "found %u cards", (unsigned)cards.size());
+  runResultsBrowser(cards);  // returns on swipe-up
 }
 
 // ---- On-screen QWERTY keyboard ---------------------------------------------

@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstring>
+#include <utility>
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
@@ -205,8 +206,8 @@ bool claudeQuery(const std::string& transcript, std::string& query_out) {
   return ok;
 }
 
-bool tcgFetchImageUrls(const std::string& query, int limit,
-                       std::vector<std::string>& urls_out) {
+bool tcgFetchCards(const std::string& query, int limit,
+                   std::vector<Card>& cards_out) {
   std::string url = tcgQueryUrl(query, limit);
   ESP_LOGI(TAG, "TCG GET %s", url.c_str());
   std::string resp;
@@ -229,12 +230,27 @@ bool tcgFetchImageUrls(const std::string& query, int limit,
   cJSON_ArrayForEach(card, data) {
     cJSON* images = cJSON_GetObjectItem(card, "images");
     cJSON* large = images ? cJSON_GetObjectItem(images, "large") : nullptr;
-    if (cJSON_IsString(large)) {
-      urls_out.emplace_back(large->valuestring);
-      ++n;
-    }
+    if (!cJSON_IsString(large)) continue;
+
+    Card c;
+    c.url = large->valuestring;
+    cJSON* name = cJSON_GetObjectItem(card, "name");
+    if (cJSON_IsString(name)) c.name = name->valuestring;
+    cJSON* supertype = cJSON_GetObjectItem(card, "supertype");
+    if (cJSON_IsString(supertype)) c.supertype = supertype->valuestring;
+    // subtypes is an array (e.g. ["Supporter"], ["Item"], ["Stadium"]); the
+    // first entry is the one that distinguishes Trainer cards for sorting.
+    cJSON* subtypes = cJSON_GetObjectItem(card, "subtypes");
+    cJSON* first_sub =
+        subtypes ? cJSON_GetArrayItem(subtypes, 0) : nullptr;
+    if (cJSON_IsString(first_sub)) c.subtype = first_sub->valuestring;
+    cJSON* evolves = cJSON_GetObjectItem(card, "evolvesFrom");
+    if (cJSON_IsString(evolves)) c.evolvesFrom = evolves->valuestring;
+
+    cards_out.push_back(std::move(c));
+    ++n;
   }
-  ESP_LOGI(TAG, "TCG parsed %d image urls", n);
+  ESP_LOGI(TAG, "TCG parsed %d cards", n);
   cJSON_Delete(root);
   return true;
 }

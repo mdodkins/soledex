@@ -74,7 +74,7 @@ dependencies:
   m5gfx:
     dependencies: []
     source:
-      path: /home/dreamer/code/pokedex/firmware/components/m5gfx
+      path: /home/dreamer/code/soledex/firmware/components/m5gfx
       type: local
     version: 0.2.23
   m5stack/M5Unified:

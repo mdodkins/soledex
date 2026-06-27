@@ -18,6 +18,14 @@ struct ImageSize {
   }
 };
 
+struct Rect {
+  Point origin;
+  ImageSize size;
+  bool operator==(const Rect& o) const {
+    return origin == o.origin && size == o.size;
+  }
+};
+
 struct Rgb {
   uint8_t r;
   uint8_t g;
